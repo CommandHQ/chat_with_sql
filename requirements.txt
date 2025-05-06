@@ -1,0 +1,11 @@
+langchain-google-genai
+langchain-community
+langchain-core
+langgraph
+pymysql
+SQLAlchemy
+urllib3
+typing-extensions
+python-dotenv
+streamlit
+mysql-connector-python
