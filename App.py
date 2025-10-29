@@ -2,8 +2,9 @@ import streamlit as st
 import os
 import time
 from langchain_core.messages import HumanMessage, AIMessage
-from create_agent import create_sql_agent
+from create_agent import create_sql_agent, get_optimization_stats, clear_query_cache
 from dotenv import load_dotenv
+import json
 
 # Load environment variables once at startup
 load_dotenv()
@@ -157,14 +158,72 @@ def render_sidebar():
         # Show additional information when connected
         if st.session_state.agent_initialized:
             st.divider()
-            
+
             st.markdown("### Database Info")
             st.markdown(f"**Host:** {st.session_state.db_config['host']}")
             st.markdown(f"**Database:** {st.session_state.db_config['name']}")
             st.markdown(f"**User:** {st.session_state.db_config['user']}")
             st.markdown("**Password:** •••••••• (secured)")
             st.markdown("**API Key:** •••••••• (secured)")
-            
+
+            # Optimization Statistics Section
+            st.divider()
+            with st.expander("📊 Performance & Optimization", expanded=False):
+                # Get optimization stats
+                opt_stats = get_optimization_stats()
+
+                if opt_stats:
+                    # Cache Statistics
+                    if 'cache_stats' in opt_stats:
+                        st.markdown("#### Query Cache")
+                        cache_stats = opt_stats['cache_stats']
+
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Cache Hit Rate", cache_stats.get('hit_rate', 'N/A'))
+                            st.metric("Cached Queries", cache_stats.get('size', 0))
+                        with col2:
+                            st.metric("Cache Hits", cache_stats.get('hits', 0))
+                            st.metric("Cache Misses", cache_stats.get('misses', 0))
+
+                        if st.button("🗑️ Clear Cache", use_container_width=True):
+                            clear_query_cache()
+                            st.success("Cache cleared successfully!")
+                            time.sleep(1)
+                            st.rerun()
+
+                    # Performance Statistics
+                    if 'performance_stats' in opt_stats:
+                        st.markdown("#### Query Performance")
+                        perf_stats = opt_stats['performance_stats']
+
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Total Queries", perf_stats.get('total_queries', 0))
+                            st.metric("Avg Time (ms)", f"{perf_stats.get('avg_time_ms', 0):.2f}")
+                        with col2:
+                            st.metric("Slow Queries", perf_stats.get('slow_queries_count', 0))
+                            st.metric("Slow Query Rate", perf_stats.get('slow_query_rate', 'N/A'))
+
+                    # Recent Queries
+                    if 'recent_queries' in opt_stats and opt_stats['recent_queries']:
+                        st.markdown("#### Recent Queries")
+                        for idx, query_info in enumerate(opt_stats['recent_queries'][:5], 1):
+                            status_icon = "⚡" if query_info.get('cached') else "🔄"
+                            slow_icon = "🐌" if query_info.get('is_slow') else ""
+                            exec_time = query_info.get('execution_time_ms', 0)
+                            st.markdown(f"{idx}. {status_icon}{slow_icon} {exec_time:.2f}ms")
+
+                    # Slow Queries Detail
+                    if 'slow_queries' in opt_stats and opt_stats['slow_queries']:
+                        st.markdown("#### Slow Queries Needing Optimization")
+                        for idx, slow_query in enumerate(opt_stats['slow_queries'][:3], 1):
+                            with st.container():
+                                st.markdown(f"**Query {idx}:** {slow_query.get('avg_time_ms', 0):.2f}ms avg")
+                                st.code(slow_query.get('query_template', 'N/A'), language='sql')
+                else:
+                    st.info("Optimization features are not enabled.")
+
             if st.button("Disconnect", use_container_width=True):
                 st.session_state.agent = None
                 st.session_state.agent_initialized = False

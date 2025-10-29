@@ -12,6 +12,7 @@ import urllib.parse
 import re
 from sqlalchemy.exc import OperationalError
 import json
+from data_optimizer import DataOptimizer
 
 def create_llm(model_name="gemini-1.5-flash", temperature=0, api_key=None):
     """Create LLM with proper error handling."""
@@ -26,11 +27,13 @@ def create_llm(model_name="gemini-1.5-flash", temperature=0, api_key=None):
         convert_system_message_to_human=False,
     )
 
-def create_db_connection(user, password, host, database, port=None):
-    """Create MySQL database connection with improved error handling and validation."""
+def create_db_connection(user, password, host, database, port=None, enable_optimization=True):
+    """Create MySQL database connection with improved error handling and optimization."""
+    global optimizer
+
     try:
         encoded_password = urllib.parse.quote_plus(password)
-        
+
         # If a port is explicitly provided, use it
         if port:
             connection_string = f"mysql+pymysql://{user}:{encoded_password}@{host}:{port}/{database}"
@@ -43,10 +46,29 @@ def create_db_connection(user, password, host, database, port=None):
         else:
             # Default MySQL connection without port
             connection_string = f"mysql+pymysql://{user}:{encoded_password}@{host}/{database}"
-        
-        connection_string += "?charset=utf8mb4&connect_timeout=10"
-        db = SQLDatabase.from_uri(connection_string)
-        
+
+        connection_string += "?charset=utf8mb4"
+
+        # Initialize the DataOptimizer if optimization is enabled
+        if enable_optimization:
+            optimizer = DataOptimizer(
+                connection_string=connection_string,
+                enable_cache=True,
+                enable_monitoring=True,
+                enable_pooling=True,
+                cache_ttl=300,  # 5 minutes
+                pool_size=5
+            )
+            # Test connection
+            test_query = "SELECT 1"
+            optimizer.execute_query(test_query)
+        else:
+            optimizer = None
+            connection_string += "&connect_timeout=10"
+
+        # Create SQLDatabase for LangChain compatibility
+        db = SQLDatabase.from_uri(connection_string + ("&connect_timeout=10" if enable_optimization else ""))
+
         # Basic connection test
         db.get_usable_table_names()
         return db
@@ -79,16 +101,39 @@ class AgentState(TypedDict):
 def execute_sql_query(query: str) -> str:
     """
     Execute the SQL query against the MySQL database and return the result.
+    Uses the data optimizer for caching and performance monitoring if enabled.
     If the query is invalid or returns no result, an error message will be returned.
     """
+    global optimizer
+
     try:
         if not query.strip().upper().startswith("SELECT"):
             return "Error: Only SELECT queries are allowed for data exploration."
-            
-        result = db.run_no_throw(query)
-        if not result or result.strip() == "":
-            return "The query executed successfully but returned no results."
-        return result
+
+        # Use optimizer if available
+        if optimizer:
+            result, metadata = optimizer.execute_query(query)
+
+            # Format result for display
+            if not result:
+                return "The query executed successfully but returned no results."
+
+            # Convert result to string format similar to SQLDatabase output
+            result_str = str(result)
+
+            # Add performance metadata as a comment
+            perf_info = f"\n[Query executed in {metadata['execution_time_ms']:.2f}ms"
+            if metadata['cached']:
+                perf_info += " (cached)"
+            perf_info += f", {metadata['row_count']} rows]"
+
+            return result_str + perf_info
+        else:
+            # Fall back to standard execution
+            result = db.run_no_throw(query)
+            if not result or result.strip() == "":
+                return "The query executed successfully but returned no results."
+            return result
     except Exception as e:
         return f"Error executing query: {str(e)}."
 
@@ -422,12 +467,32 @@ def should_route(state: AgentState) -> Literal["process_input", "handle_error", 
     
     return "process_input"
 
-def create_sql_agent(api_key, db_user, db_password, db_host, db_name, db_port=None):
-    """Create the SQL agent with enhanced in-memory conversation retention."""
+def get_optimization_stats() -> Optional[Dict[str, Any]]:
+    """Get optimization statistics from the data optimizer."""
+    global optimizer
+    if optimizer:
+        return optimizer.get_optimization_report()
+    return None
+
+def get_index_recommendations(query: str) -> Optional[Dict[str, Any]]:
+    """Get index recommendations for a specific query."""
+    global optimizer
+    if optimizer:
+        return optimizer.analyze_query_performance(query)
+    return None
+
+def clear_query_cache() -> None:
+    """Clear the query result cache."""
+    global optimizer
+    if optimizer:
+        optimizer.clear_cache()
+
+def create_sql_agent(api_key, db_user, db_password, db_host, db_name, db_port=None, enable_optimization=True):
+    """Create the SQL agent with enhanced in-memory conversation retention and data optimization."""
     global llm, db
-    
+
     llm = create_llm(api_key=api_key)
-    db = create_db_connection(db_user, db_password, db_host, db_name, db_port)
+    db = create_db_connection(db_user, db_password, db_host, db_name, db_port, enable_optimization)
     
     workflow = StateGraph(AgentState)
     
